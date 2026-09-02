@@ -16,6 +16,7 @@ func TestService_NewService(t *testing.T) {
 	assert.NotNil(t, s.rsdMap)
 	assert.NotNil(t, s.subs)
 	assert.NotNil(t, s.discoveries)
+	assert.NotNil(t, s.interfaceRole)
 }
 
 func TestService_AttachNetmon(t *testing.T) {
@@ -375,6 +376,30 @@ func TestService_HandleInterfaceAdded_SkipsDuplicateDiscovery(t *testing.T) {
 	s.discoveriesMu.Unlock()
 
 	assert.Equal(t, 1, count, "should not spawn duplicate discovery")
+}
+
+func TestService_HandleInterfaceAdded_SkipsIneligibleInterfaces(t *testing.T) {
+	for name, role := range map[string]rsdInterfaceRole{
+		"public CDC-NCM": rsdInterfacePublic,
+		"ordinary en":    rsdInterfaceUnrelated,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := NewService()
+			s.interfaceRole = func(context.Context, string) (rsdInterfaceRole, error) {
+				return role, nil
+			}
+
+			s.handleNetworkInterfaceEvent(context.Background(), netmon.InterfaceEvent{
+				Type:          netmon.InterfaceAdded,
+				InterfaceName: "en25",
+			})
+			s.wg.Wait()
+
+			s.discoveriesMu.Lock()
+			defer s.discoveriesMu.Unlock()
+			assert.Empty(t, s.discoveries)
+		})
+	}
 }
 
 func TestService_HandleInterfaceRemoved_CancelsDiscovery(t *testing.T) {

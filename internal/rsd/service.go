@@ -15,6 +15,15 @@ type discoveryInfo struct {
 	cancel context.CancelFunc
 }
 
+type rsdInterfaceRole uint8
+
+const (
+	rsdInterfaceUnknown rsdInterfaceRole = iota
+	rsdInterfacePublic
+	rsdInterfaceRemoted
+	rsdInterfaceUnrelated
+)
+
 type Service struct {
 	// NetMon subscription
 	ifCh    <-chan netmon.InterfaceEvent
@@ -34,15 +43,17 @@ type Service struct {
 	discoveries     map[string]discoveryInfo // interface name -> discovery info
 	nextDiscoveryID uint64
 	wg              sync.WaitGroup // Track goroutines for clean shutdown
+	interfaceRole   func(context.Context, string) (rsdInterfaceRole, error)
 
 	closed bool
 }
 
 func NewService() *Service {
 	return &Service{
-		rsdMap:      make(map[string]RsdService),
-		subs:        make(map[int]*runtime.SubQueue[RsdServiceEvent]),
-		discoveries: make(map[string]discoveryInfo),
+		rsdMap:        make(map[string]RsdService),
+		subs:          make(map[int]*runtime.SubQueue[RsdServiceEvent]),
+		discoveries:   make(map[string]discoveryInfo),
+		interfaceRole: platformRsdInterfaceRole,
 	}
 }
 
@@ -177,6 +188,23 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 				}
 				s.discoveriesMu.Unlock()
 			}()
+
+			role, err := s.interfaceRole(discoverCtx, ev.InterfaceName)
+			if err != nil {
+				if discoverCtx.Err() != nil {
+					return
+				}
+				log.WithField("interface", ev.InterfaceName).WithError(err).
+					Debug("Could not classify interface, attempting RSD discovery")
+			}
+			if role == rsdInterfacePublic || role == rsdInterfaceUnrelated {
+				message := "Skipping interface unrelated to RSD"
+				if role == rsdInterfacePublic {
+					message = "Skipping public CDC-NCM interface"
+				}
+				log.WithField("interface", ev.InterfaceName).Info(message)
+				return
+			}
 
 			rsdService, err := FindRsdService(discoverCtx, ev.InterfaceName)
 			if err != nil {
