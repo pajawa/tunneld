@@ -201,11 +201,12 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 					Warn("Could not classify interface, attempting RSD discovery")
 			}
 			if role == rsdInterfacePublic || role == rsdInterfaceUnrelated {
-				message := "Skipping interface unrelated to RSD"
 				if role == rsdInterfacePublic {
-					message = "Skipping public CDC-NCM interface"
+					log.WithField("interface", ev.InterfaceName).
+						Warn("Skipping interface positively classified as public CDC-NCM")
+					return
 				}
-				log.WithField("interface", ev.InterfaceName).Info(message)
+				log.WithField("interface", ev.InterfaceName).Info("Skipping interface unrelated to RSD")
 				return
 			}
 

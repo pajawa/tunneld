@@ -16,6 +16,7 @@ import (
 const (
 	appleVendorID       = 0x05ac
 	ioregCacheDuration  = 500 * time.Millisecond
+	ioregFailureCache   = 100 * time.Millisecond
 	ioregNegativeRetry  = 750 * time.Millisecond
 	ioregCommandTimeout = 2 * time.Second
 )
@@ -25,8 +26,14 @@ var defaultDarwinInterfaceRoles darwinInterfaceRoleCache
 type darwinInterfaceRoleCache struct {
 	mu        sync.Mutex
 	expiresAt time.Time
-	roles     map[string]rsdInterfaceRole
-	scan      func(context.Context) (map[string]rsdInterfaceRole, error)
+	snapshot  darwinInterfaceRoleSnapshot
+	err       error
+	scan      func(context.Context) (darwinInterfaceRoleSnapshot, error)
+}
+
+type darwinInterfaceRoleSnapshot struct {
+	roles           map[string]rsdInterfaceRole
+	reliableAbsence bool
 }
 
 type ioregNode struct {
@@ -52,8 +59,11 @@ func retryDarwinInterfaceRole(
 	lookup func(context.Context, string) (rsdInterfaceRole, error),
 ) (rsdInterfaceRole, error) {
 	role, err := lookup(ctx, interfaceName)
-	if err != nil || role != rsdInterfaceUnrelated {
+	if err == nil && role != rsdInterfaceUnknown && role != rsdInterfaceUnrelated {
 		return role, err
+	}
+	if ctx.Err() != nil {
+		return rsdInterfaceUnknown, ctx.Err()
 	}
 
 	// Netmon emits InterfaceAdded only once. Give a newly published USB
@@ -74,24 +84,26 @@ func (c *darwinInterfaceRoleCache) role(ctx context.Context, interfaceName strin
 	defer c.mu.Unlock()
 
 	if time.Now().Before(c.expiresAt) {
-		return darwinInterfaceRole(c.roles, interfaceName), nil
+		return c.snapshot.role(interfaceName), c.err
 	}
 
 	scan := c.scan
 	if scan == nil {
 		scan = scanDarwinInterfaceRoles
 	}
-	roles, err := scan(ctx)
+	snapshot, err := scan(ctx)
+	c.snapshot = snapshot
+	c.err = err
 	if err != nil {
+		c.expiresAt = time.Now().Add(ioregFailureCache)
 		return rsdInterfaceUnknown, err
 	}
-	c.roles = roles
 	c.expiresAt = time.Now().Add(ioregCacheDuration)
 
-	return darwinInterfaceRole(roles, interfaceName), nil
+	return snapshot.role(interfaceName), nil
 }
 
-func scanDarwinInterfaceRoles(ctx context.Context) (map[string]rsdInterfaceRole, error) {
+func scanDarwinInterfaceRoles(ctx context.Context) (darwinInterfaceRoleSnapshot, error) {
 	commandCtx, cancel := context.WithTimeout(ctx, ioregCommandTimeout)
 	defer cancel()
 
@@ -108,72 +120,95 @@ func scanDarwinInterfaceRoles(ctx context.Context) (map[string]rsdInterfaceRole,
 	output, err := command.Output()
 	if err != nil {
 		if commandCtx.Err() != nil {
-			return nil, fmt.Errorf("read USB registry: %w", commandCtx.Err())
+			return darwinInterfaceRoleSnapshot{}, fmt.Errorf("read USB registry: %w", commandCtx.Err())
 		}
 		if detail := strings.TrimSpace(stderr.String()); detail != "" {
-			return nil, fmt.Errorf("read USB registry: %w: %s", err, detail)
+			return darwinInterfaceRoleSnapshot{}, fmt.Errorf("read USB registry: %w: %s", err, detail)
 		}
-		return nil, fmt.Errorf("read USB registry: %w", err)
+		return darwinInterfaceRoleSnapshot{}, fmt.Errorf("read USB registry: %w", err)
 	}
 
-	roles, err := parseDarwinInterfaceRoles(output)
+	snapshot, err := parseDarwinInterfaceRoles(output)
 	if err != nil {
-		return nil, fmt.Errorf("parse USB registry: %w", err)
+		return darwinInterfaceRoleSnapshot{}, fmt.Errorf("parse USB registry: %w", err)
 	}
-	return roles, nil
+	return snapshot, nil
 }
 
-func parseDarwinInterfaceRoles(output []byte) (map[string]rsdInterfaceRole, error) {
-	roles := make(map[string]rsdInterfaceRole)
+func parseDarwinInterfaceRoles(output []byte) (darwinInterfaceRoleSnapshot, error) {
+	snapshot := darwinInterfaceRoleSnapshot{
+		roles:           make(map[string]rsdInterfaceRole),
+		reliableAbsence: true,
+	}
 	deviceCount := 0
 	for _, device := range parseIORegNodes(output) {
 		if device.class != "IOUSBHostDevice" {
 			continue
 		}
 		deviceCount++
-		if nodeInt(device, "idVendor") != appleVendorID {
+
+		interfaces := descendantUSBHostInterfaces(device)
+		vendor, vendorOK := nodeInt(device, "idVendor")
+		if vendorOK && vendor != appleVendorID {
 			continue
 		}
 
 		controls := make(map[int]struct{})
 		dataInterfaces := make(map[int][]*ioregNode)
 		deviceNames := make(map[string]struct{})
-		for _, child := range descendantUSBHostInterfaces(device) {
+		for _, child := range interfaces {
 			for _, name := range descendantBSDNames(child) {
 				deviceNames[name] = struct{}{}
 			}
 
-			number := nodeInt(child, "bInterfaceNumber")
+			number, numberOK := nodeInt(child, "bInterfaceNumber")
+			class, classOK := nodeInt(child, "bInterfaceClass")
+			subclass, subclassOK := nodeInt(child, "bInterfaceSubClass")
 			switch {
-			case nodeInt(child, "bInterfaceClass") == 2 && nodeInt(child, "bInterfaceSubClass") == 0x0d:
+			case numberOK && classOK && subclassOK && class == 2 && subclass == 0x0d:
 				controls[number] = struct{}{}
-			case nodeInt(child, "bInterfaceClass") == 10:
+			case numberOK && classOK && class == 10:
 				dataInterfaces[number] = append(dataInterfaces[number], child)
 			}
 		}
+
+		deviceRoles := make(map[string]rsdInterfaceRole, len(deviceNames))
+		for name := range deviceNames {
+			deviceRoles[name] = rsdInterfaceUnknown
+		}
+		if !vendorOK {
+			snapshot.reliableAbsence = false
+			mergeDarwinInterfaceRoles(snapshot.roles, deviceRoles)
+			continue
+		}
+		if len(controls) == 0 && len(dataInterfaces) == 0 {
+			continue
+		}
+
+		complete := len(controls) == 2 && len(dataInterfaces) == 2
 		for number := range controls {
 			if _, ok := dataInterfaces[number+1]; !ok {
-				return nil, fmt.Errorf("Apple NCM control %d has no data interface", number)
+				complete = false
 			}
 		}
 		for number, nodes := range dataInterfaces {
 			if _, ok := controls[number-1]; !ok {
-				return nil, fmt.Errorf("Apple NCM data interface %d has no control interface", number)
+				complete = false
 			}
 			for _, node := range nodes {
 				if len(descendantBSDNames(node)) == 0 {
-					return nil, fmt.Errorf("Apple NCM data interface %d has no BSD name", number)
+					complete = false
 				}
 			}
 		}
+		if !complete {
+			snapshot.reliableAbsence = false
+			mergeDarwinInterfaceRoles(snapshot.roles, deviceRoles)
+			continue
+		}
 
-		validDataInterfaces := make(map[int][]*ioregNode)
 		hiddenDataInterfaces := make([]int, 0, 1)
 		for number, nodes := range dataInterfaces {
-			if _, ok := controls[number-1]; !ok {
-				continue
-			}
-			validDataInterfaces[number] = nodes
 			for _, node := range nodes {
 				if descendantHasProperty(node, "HiddenInterface", "Yes") {
 					hiddenDataInterfaces = append(hiddenDataInterfaces, number)
@@ -182,18 +217,13 @@ func parseDarwinInterfaceRoles(output []byte) (map[string]rsdInterfaceRole, erro
 			}
 		}
 
-		deviceRoles := make(map[string]rsdInterfaceRole, len(deviceNames))
-		for name := range deviceNames {
-			deviceRoles[name] = rsdInterfaceUnknown
-		}
-
 		// Current Apple devices expose exactly two complete NCM functions. The
 		// private/remoted function has a positive HiddenInterface marker and is
 		// also the higher-numbered function. Any incomplete or contradictory
 		// snapshot remains unknown so RSD discovery fails open.
-		if len(validDataInterfaces) == 2 && len(hiddenDataInterfaces) == 1 {
+		if len(dataInterfaces) == 2 && len(hiddenDataInterfaces) == 1 {
 			remotedInterfaceNumber := hiddenDataInterfaces[0]
-			for number := range validDataInterfaces {
+			for number := range dataInterfaces {
 				if number > remotedInterfaceNumber {
 					remotedInterfaceNumber = -1
 					break
@@ -201,7 +231,7 @@ func parseDarwinInterfaceRoles(output []byte) (map[string]rsdInterfaceRole, erro
 			}
 
 			if remotedInterfaceNumber >= 0 {
-				for number, nodes := range validDataInterfaces {
+				for number, nodes := range dataInterfaces {
 					role := rsdInterfacePublic
 					if number == remotedInterfaceNumber {
 						role = rsdInterfaceRemoted
@@ -215,28 +245,33 @@ func parseDarwinInterfaceRoles(output []byte) (map[string]rsdInterfaceRole, erro
 			}
 		}
 
-		for name, role := range deviceRoles {
-			if existing, ok := roles[name]; ok && existing != role {
-				roles[name] = rsdInterfaceUnknown
-				continue
-			}
-			roles[name] = role
-		}
+		mergeDarwinInterfaceRoles(snapshot.roles, deviceRoles)
 	}
 
 	if deviceCount == 0 {
-		return nil, fmt.Errorf("no IOUSBHostDevice nodes found")
+		return darwinInterfaceRoleSnapshot{}, fmt.Errorf("no IOUSBHostDevice nodes found")
 	}
-	return roles, nil
+	return snapshot, nil
 }
 
-func darwinInterfaceRole(roles map[string]rsdInterfaceRole, interfaceName string) rsdInterfaceRole {
-	if role, ok := roles[interfaceName]; ok {
+func (s darwinInterfaceRoleSnapshot) role(interfaceName string) rsdInterfaceRole {
+	if role, ok := s.roles[interfaceName]; ok {
 		return role
 	}
-	// A successful registry snapshot contains every BSD interface backed by
-	// an Apple USB NCM function. Anything absent cannot carry remoted traffic.
+	if !s.reliableAbsence {
+		return rsdInterfaceUnknown
+	}
 	return rsdInterfaceUnrelated
+}
+
+func mergeDarwinInterfaceRoles(target, source map[string]rsdInterfaceRole) {
+	for name, role := range source {
+		if existing, ok := target[name]; ok && existing != role {
+			target[name] = rsdInterfaceUnknown
+			continue
+		}
+		target[name] = role
+	}
 }
 
 func parseIORegNodes(output []byte) []*ioregNode {
@@ -247,29 +282,26 @@ func parseIORegNodes(output []byte) []*ioregNode {
 	for _, rawLine := range bytes.Split(output, []byte{'\n'}) {
 		line := string(rawLine)
 		column := strings.Index(line, "+-o ")
-		if column >= 0 {
+		if column >= 0 && ioregTreePrefix(line[:column]) {
 			class := ioregClass(line)
-			if class == "" {
-				current = nil
+			if class != "" {
+				node := &ioregNode{
+					class:      class,
+					column:     column,
+					properties: make(map[string]string),
+				}
+				for len(stack) > 0 && stack[len(stack)-1].column >= column {
+					stack = stack[:len(stack)-1]
+				}
+				if len(stack) > 0 {
+					parent := stack[len(stack)-1]
+					parent.children = append(parent.children, node)
+				}
+				stack = append(stack, node)
+				nodes = append(nodes, node)
+				current = node
 				continue
 			}
-
-			node := &ioregNode{
-				class:      class,
-				column:     column,
-				properties: make(map[string]string),
-			}
-			for len(stack) > 0 && stack[len(stack)-1].column >= column {
-				stack = stack[:len(stack)-1]
-			}
-			if len(stack) > 0 {
-				parent := stack[len(stack)-1]
-				parent.children = append(parent.children, node)
-			}
-			stack = append(stack, node)
-			nodes = append(nodes, node)
-			current = node
-			continue
 		}
 
 		if current == nil {
@@ -282,6 +314,15 @@ func parseIORegNodes(output []byte) []*ioregNode {
 	}
 
 	return nodes
+}
+
+func ioregTreePrefix(prefix string) bool {
+	for _, char := range prefix {
+		if char != ' ' && char != '|' {
+			return false
+		}
+	}
+	return true
 }
 
 func ioregClass(line string) string {
@@ -315,16 +356,16 @@ func ioregProperty(line string) (string, string, bool) {
 	return line[start+1 : start+1+end], strings.TrimSpace(remainder[1:]), true
 }
 
-func nodeInt(node *ioregNode, key string) int {
-	value, ok := node.properties[key]
+func nodeInt(node *ioregNode, key string) (int, bool) {
+	value, ok := nodeString(node, key)
 	if !ok {
-		return -1
+		return 0, false
 	}
 	parsed, err := strconv.ParseInt(value, 0, 32)
 	if err != nil {
-		return -1
+		return 0, false
 	}
-	return int(parsed)
+	return int(parsed), true
 }
 
 func descendantBSDNames(node *ioregNode) []string {

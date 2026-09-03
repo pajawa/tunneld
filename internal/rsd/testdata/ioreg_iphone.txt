@@ -1,42 +1,50 @@
-+-o iPhone@00100000  <class IOUSBHostDevice, id 0x1>
++-o USB Hub@00100000  <class IOUSBHostDevice, id 0xe>
   | {
-  |   "idVendor" = 1452
+  |   "idVendor" = 1234
   | }
-  +-o NCM Control@2  <class IOUSBHostInterface, id 0x2>
-  | | {
-  | |   "bInterfaceClass" = 2
-  | |   "bInterfaceSubClass" = 13
-  | |   "bInterfaceNumber" = 2
-  | | }
-  +-o NCM Data@3  <class IOUSBHostInterface, id 0x3>
-  | | {
-  | |   "bInterfaceClass" = 10
-  | |   "bInterfaceNumber" = 3
-  | | }
-  | +-o AppleUSBNCMData  <class AppleUSBNCMData, id 0x4>
-  |   +-o en48  <class IOEthernetInterface, id 0x5>
-  |       {
-  |         "BSD Name" = "en48"
-  |       }
-  +-o NCM Control@4  <class IOUSBHostInterface, id 0x6>
-  | | {
-  | |   "bInterfaceClass" = 2
-  | |   "bInterfaceSubClass" = 13
-  | |   "bInterfaceNumber" = 4
-  | | }
-  +-o NCM Data@5  <class IOUSBHostInterface, id 0x7>
-  | | {
-  | |   "bInterfaceClass" = 10
-  | |   "bInterfaceNumber" = 5
-  | | }
-  | +-o AppleUSBNCMData  <class AppleUSBNCMData, id 0x8>
-  |   | {
-  |   |   "HiddenInterface" = Yes
-  |   | }
-  |   +-o en43  <class IOEthernetInterface, id 0x9>
-  |       {
-  |         "BSD Name" = "en43"
-  |       }
+  +-o USB Hub@00110000  <class IOUSBHostDevice, id 0xf>
+    | {
+    |   "idVendor" = 4321
+    | }
+    +-o iPhone@00120000  <class IOUSBHostDevice, id 0x1>
+      | {
+      |   "idVendor" = 1452
+      | }
+      +-o NCM Control@2  <class IOUSBHostInterface, id 0x2>
+      | | {
+      | |   "bInterfaceClass" = 2
+      | |   "bInterfaceSubClass" = 13
+      | |   "bInterfaceNumber" = 2
+      | | }
+      +-o NCM Data@3  <class IOUSBHostInterface, id 0x3>
+      | | {
+      | |   "bInterfaceClass" = 10
+      | |   "bInterfaceNumber" = 3
+      | | }
+      | +-o AppleUSBNCMData  <class AppleUSBNCMData, id 0x4>
+      |   +-o en48  <class IOEthernetInterface, id 0x5>
+      |       {
+      |         "BSD Name" = "en48"
+      |       }
+      +-o NCM Control@4  <class IOUSBHostInterface, id 0x6>
+      | | {
+      | |   "bInterfaceClass" = 2
+      | |   "bInterfaceSubClass" = 13
+      | |   "bInterfaceNumber" = 4
+      | | }
+      +-o NCM Data@5  <class IOUSBHostInterface, id 0x7>
+      | | {
+      | |   "bInterfaceClass" = 10
+      | |   "bInterfaceNumber" = 5
+      | | }
+      | +-o AppleUSBNCMData  <class AppleUSBNCMData, id 0x8>
+      |   | {
+      |   |   "HiddenInterface" = Yes
+      |   | }
+      |   +-o en43  <class IOEthernetInterface, id 0x9>
+      |       {
+      |         "BSD Name" = "en43"
+      |       }
 
 +-o Third-party NCM@00200000  <class IOUSBHostDevice, id 0xa>
   | {

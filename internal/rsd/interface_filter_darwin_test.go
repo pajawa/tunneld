@@ -4,6 +4,7 @@ package rsd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -17,14 +18,14 @@ func TestParseDarwinInterfaceRoles(t *testing.T) {
 	output, err := os.ReadFile("testdata/ioreg_iphone.txt")
 	require.NoError(t, err)
 
-	roles, err := parseDarwinInterfaceRoles(output)
+	snapshot, err := parseDarwinInterfaceRoles(output)
 	require.NoError(t, err)
 
-	assert.Equal(t, rsdInterfacePublic, roles["en48"])
-	assert.Equal(t, rsdInterfaceRemoted, roles["en43"])
-	assert.NotContains(t, roles, "en36")
-	assert.Equal(t, rsdInterfaceUnrelated, darwinInterfaceRole(roles, "en0"))
-	assert.Equal(t, rsdInterfaceUnrelated, darwinInterfaceRole(roles, "en36"))
+	assert.Equal(t, rsdInterfacePublic, snapshot.roles["en48"])
+	assert.Equal(t, rsdInterfaceRemoted, snapshot.roles["en43"])
+	assert.NotContains(t, snapshot.roles, "en36")
+	assert.Equal(t, rsdInterfaceUnrelated, snapshot.role("en0"))
+	assert.Equal(t, rsdInterfaceUnrelated, snapshot.role("en36"))
 }
 
 func TestParseDarwinInterfaceRolesLeavesIncompletePairUnknown(t *testing.T) {
@@ -50,9 +51,11 @@ func TestParseDarwinInterfaceRolesLeavesIncompletePairUnknown(t *testing.T) {
   |       }
 `)
 
-	roles, err := parseDarwinInterfaceRoles(output)
+	snapshot, err := parseDarwinInterfaceRoles(output)
 	require.NoError(t, err)
-	assert.Equal(t, rsdInterfaceUnknown, roles["en25"])
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.roles["en25"])
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.role("en38"))
+	assert.False(t, snapshot.reliableAbsence)
 }
 
 func TestParseDarwinInterfaceRolesFailsOpenWithoutHiddenMarker(t *testing.T) {
@@ -60,10 +63,10 @@ func TestParseDarwinInterfaceRolesFailsOpenWithoutHiddenMarker(t *testing.T) {
 	require.NoError(t, err)
 	output = []byte(strings.ReplaceAll(string(output), `"HiddenInterface" = Yes`, `"HiddenConfiguration" = Yes`))
 
-	roles, err := parseDarwinInterfaceRoles(output)
+	snapshot, err := parseDarwinInterfaceRoles(output)
 	require.NoError(t, err)
-	assert.Equal(t, rsdInterfaceUnknown, roles["en48"])
-	assert.Equal(t, rsdInterfaceUnknown, roles["en43"])
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.roles["en48"])
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.roles["en43"])
 }
 
 func TestParseDarwinInterfaceRolesNormalizesPropertyValues(t *testing.T) {
@@ -72,24 +75,63 @@ func TestParseDarwinInterfaceRolesNormalizesPropertyValues(t *testing.T) {
 	output = []byte(strings.ReplaceAll(string(output), `"BSD Name" = "en48"`, `"BSD Name" = en48`))
 	output = []byte(strings.ReplaceAll(string(output), `"HiddenInterface" = Yes`, `"HiddenInterface" = "Yes"`))
 
-	roles, err := parseDarwinInterfaceRoles(output)
+	snapshot, err := parseDarwinInterfaceRoles(output)
 	require.NoError(t, err)
-	assert.Equal(t, rsdInterfacePublic, roles["en48"])
-	assert.Equal(t, rsdInterfaceRemoted, roles["en43"])
+	assert.Equal(t, rsdInterfacePublic, snapshot.roles["en48"])
+	assert.Equal(t, rsdInterfaceRemoted, snapshot.roles["en43"])
 }
 
-func TestParseDarwinInterfaceRolesRejectsIncompleteAppleNCMTree(t *testing.T) {
+func TestParseDarwinInterfaceRolesNormalizesNumericValues(t *testing.T) {
+	output, err := os.ReadFile("testdata/ioreg_iphone.txt")
+	require.NoError(t, err)
+	output = []byte(strings.ReplaceAll(string(output), `"idVendor" = 1452`, `"idVendor" = "1452"`))
+
+	snapshot, err := parseDarwinInterfaceRoles(output)
+	require.NoError(t, err)
+	assert.Equal(t, rsdInterfacePublic, snapshot.roles["en48"])
+	assert.Equal(t, rsdInterfaceRemoted, snapshot.roles["en43"])
+}
+
+func TestParseDarwinInterfaceRolesFailsOpenWhenVendorIsMissing(t *testing.T) {
+	output, err := os.ReadFile("testdata/ioreg_iphone.txt")
+	require.NoError(t, err)
+	output = []byte(strings.ReplaceAll(string(output), `"idVendor" = 1452`, `"USB Vendor" = 1452`))
+
+	snapshot, err := parseDarwinInterfaceRoles(output)
+	require.NoError(t, err)
+	assert.False(t, snapshot.reliableAbsence)
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.role("en48"))
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.role("en43"))
+}
+
+func TestParseDarwinInterfaceRolesMarksIncompleteAppleNCMTreeUnreliable(t *testing.T) {
 	output, err := os.ReadFile("testdata/ioreg_iphone.txt")
 	require.NoError(t, err)
 	output = []byte(strings.ReplaceAll(string(output), `"BSD Name"`, `"Interface Name"`))
 
-	_, err = parseDarwinInterfaceRoles(output)
-	require.ErrorContains(t, err, "has no BSD name")
+	snapshot, err := parseDarwinInterfaceRoles(output)
+	require.NoError(t, err)
+	assert.False(t, snapshot.reliableAbsence)
+	assert.Equal(t, rsdInterfaceUnknown, snapshot.role("en43"))
 }
 
 func TestParseDarwinInterfaceRolesRejectsMalformedSnapshot(t *testing.T) {
 	_, err := parseDarwinInterfaceRoles([]byte(`"idVendor" = 1452`))
 	require.ErrorContains(t, err, "no IOUSBHostDevice nodes found")
+}
+
+func TestParseIORegNodesIgnoresNodeMarkerInsideProperty(t *testing.T) {
+	nodes := parseIORegNodes([]byte(`
++-o Device  <class IOUSBHostDevice, id 0x1>
+  | {
+  |   "Product Name" = "contains +-o <class Bogus, data>"
+  |   "idVendor" = 1452
+  | }
+`))
+	require.Len(t, nodes, 1)
+	vendor, ok := nodeInt(nodes[0], "idVendor")
+	require.True(t, ok)
+	assert.Equal(t, appleVendorID, vendor)
 }
 
 func TestDescendantUSBHostInterfacesAllowsIntermediaryNodes(t *testing.T) {
@@ -106,30 +148,46 @@ func TestDescendantUSBHostInterfacesAllowsIntermediaryNodes(t *testing.T) {
 	assert.Equal(t, []*ioregNode{wanted}, descendantUSBHostInterfaces(root))
 }
 
-func TestRetryDarwinInterfaceRoleRetriesNegativeResult(t *testing.T) {
-	calls := 0
-	lookup := func(context.Context, string) (rsdInterfaceRole, error) {
-		calls++
-		if calls == 1 {
-			return rsdInterfaceUnrelated, nil
-		}
-		return rsdInterfaceRemoted, nil
+func TestRetryDarwinInterfaceRoleRetriesUncertainResults(t *testing.T) {
+	tests := map[string]struct {
+		role rsdInterfaceRole
+		err  error
+	}{
+		"unrelated": {role: rsdInterfaceUnrelated},
+		"unknown":   {role: rsdInterfaceUnknown},
+		"error":     {role: rsdInterfaceUnknown, err: errors.New("partial snapshot")},
 	}
 
-	role, err := retryDarwinInterfaceRole(context.Background(), "en43", 0, lookup)
-	require.NoError(t, err)
-	assert.Equal(t, rsdInterfaceRemoted, role)
-	assert.Equal(t, 2, calls)
+	for name, first := range tests {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			lookup := func(context.Context, string) (rsdInterfaceRole, error) {
+				calls++
+				if calls == 1 {
+					return first.role, first.err
+				}
+				return rsdInterfaceRemoted, nil
+			}
+
+			role, err := retryDarwinInterfaceRole(context.Background(), "en43", 0, lookup)
+			require.NoError(t, err)
+			assert.Equal(t, rsdInterfaceRemoted, role)
+			assert.Equal(t, 2, calls)
+		})
+	}
 }
 
 func TestDarwinInterfaceRoleCacheCachesNegativeLookups(t *testing.T) {
 	scanCalls := 0
 	cache := darwinInterfaceRoleCache{
 		expiresAt: time.Now().Add(time.Minute),
-		roles:     map[string]rsdInterfaceRole{"en43": rsdInterfaceRemoted},
-		scan: func(context.Context) (map[string]rsdInterfaceRole, error) {
+		snapshot: darwinInterfaceRoleSnapshot{
+			roles:           map[string]rsdInterfaceRole{"en43": rsdInterfaceRemoted},
+			reliableAbsence: true,
+		},
+		scan: func(context.Context) (darwinInterfaceRoleSnapshot, error) {
 			scanCalls++
-			return nil, nil
+			return darwinInterfaceRoleSnapshot{}, nil
 		},
 	}
 
@@ -137,4 +195,21 @@ func TestDarwinInterfaceRoleCacheCachesNegativeLookups(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, rsdInterfaceUnrelated, role)
 	assert.Zero(t, scanCalls)
+}
+
+func TestDarwinInterfaceRoleCacheCachesScanFailure(t *testing.T) {
+	scanCalls := 0
+	cache := darwinInterfaceRoleCache{
+		scan: func(context.Context) (darwinInterfaceRoleSnapshot, error) {
+			scanCalls++
+			return darwinInterfaceRoleSnapshot{}, errors.New("ioreg failed")
+		},
+	}
+
+	for range 2 {
+		role, err := cache.role(context.Background(), "en43")
+		require.Error(t, err)
+		assert.Equal(t, rsdInterfaceUnknown, role)
+	}
+	assert.Equal(t, 1, scanCalls)
 }
