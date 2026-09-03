@@ -2,6 +2,7 @@ package rsd
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ func TestService_NewService(t *testing.T) {
 	assert.NotNil(t, s.subs)
 	assert.NotNil(t, s.discoveries)
 	assert.NotNil(t, s.interfaceRole)
+	assert.NotNil(t, s.findRsdService)
 }
 
 func TestService_AttachNetmon(t *testing.T) {
@@ -388,6 +390,11 @@ func TestService_HandleInterfaceAdded_SkipsIneligibleInterfaces(t *testing.T) {
 			s.interfaceRole = func(context.Context, string) (rsdInterfaceRole, error) {
 				return role, nil
 			}
+			called := make(chan struct{}, 1)
+			s.findRsdService = func(context.Context, string) (RsdService, error) {
+				called <- struct{}{}
+				return RsdService{}, errors.New("unexpected discovery")
+			}
 
 			s.handleNetworkInterfaceEvent(context.Background(), netmon.InterfaceEvent{
 				Type:          netmon.InterfaceAdded,
@@ -398,6 +405,45 @@ func TestService_HandleInterfaceAdded_SkipsIneligibleInterfaces(t *testing.T) {
 			s.discoveriesMu.Lock()
 			defer s.discoveriesMu.Unlock()
 			assert.Empty(t, s.discoveries)
+			assert.Empty(t, called)
+		})
+	}
+}
+
+func TestService_HandleInterfaceAdded_FailsOpenWhenClassificationIsUncertain(t *testing.T) {
+	tests := map[string]struct {
+		role rsdInterfaceRole
+		err  error
+	}{
+		"remoted":          {role: rsdInterfaceRemoted},
+		"unknown":          {role: rsdInterfaceUnknown},
+		"classifier error": {role: rsdInterfaceUnknown, err: errors.New("ioreg failed")},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewService()
+			s.interfaceRole = func(context.Context, string) (rsdInterfaceRole, error) {
+				return test.role, test.err
+			}
+			called := make(chan string, 1)
+			s.findRsdService = func(_ context.Context, interfaceName string) (RsdService, error) {
+				called <- interfaceName
+				return RsdService{}, errors.New("stop test discovery")
+			}
+
+			s.handleNetworkInterfaceEvent(context.Background(), netmon.InterfaceEvent{
+				Type:          netmon.InterfaceAdded,
+				InterfaceName: "en25",
+			})
+
+			select {
+			case interfaceName := <-called:
+				assert.Equal(t, "en25", interfaceName)
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for RSD discovery")
+			}
+			s.wg.Wait()
 		})
 	}
 }

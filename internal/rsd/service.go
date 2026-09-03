@@ -44,16 +44,18 @@ type Service struct {
 	nextDiscoveryID uint64
 	wg              sync.WaitGroup // Track goroutines for clean shutdown
 	interfaceRole   func(context.Context, string) (rsdInterfaceRole, error)
+	findRsdService  func(context.Context, string) (RsdService, error)
 
 	closed bool
 }
 
 func NewService() *Service {
 	return &Service{
-		rsdMap:        make(map[string]RsdService),
-		subs:          make(map[int]*runtime.SubQueue[RsdServiceEvent]),
-		discoveries:   make(map[string]discoveryInfo),
-		interfaceRole: platformRsdInterfaceRole,
+		rsdMap:         make(map[string]RsdService),
+		subs:           make(map[int]*runtime.SubQueue[RsdServiceEvent]),
+		discoveries:    make(map[string]discoveryInfo),
+		interfaceRole:  platformRsdInterfaceRole,
+		findRsdService: FindRsdService,
 	}
 }
 
@@ -206,7 +208,7 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 				return
 			}
 
-			rsdService, err := FindRsdService(discoverCtx, ev.InterfaceName)
+			rsdService, err := s.findRsdService(discoverCtx, ev.InterfaceName)
 			if err != nil {
 				log.WithField("interface", ev.InterfaceName).WithError(err).Trace("Stopped looking for an RSD service")
 				return

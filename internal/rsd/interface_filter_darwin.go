@@ -64,34 +64,55 @@ func scanDarwinInterfaceRoles(ctx context.Context) (map[string]rsdInterfaceRole,
 	commandCtx, cancel := context.WithTimeout(ctx, ioregCommandTimeout)
 	defer cancel()
 
-	output, err := exec.CommandContext(
+	command := exec.CommandContext(
 		commandCtx,
 		"/usr/sbin/ioreg",
 		"-r",
 		"-c", "IOUSBHostDevice",
 		"-l",
 		"-w", "0",
-		"-d", "4",
-	).Output()
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
+		if commandCtx.Err() != nil {
+			return nil, fmt.Errorf("read USB registry: %w", commandCtx.Err())
+		}
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("read USB registry: %w: %s", err, detail)
+		}
 		return nil, fmt.Errorf("read USB registry: %w", err)
 	}
 
-	return parseDarwinInterfaceRoles(output), nil
+	roles, err := parseDarwinInterfaceRoles(output)
+	if err != nil {
+		return nil, fmt.Errorf("parse USB registry: %w", err)
+	}
+	return roles, nil
 }
 
-func parseDarwinInterfaceRoles(output []byte) map[string]rsdInterfaceRole {
+func parseDarwinInterfaceRoles(output []byte) (map[string]rsdInterfaceRole, error) {
 	roles := make(map[string]rsdInterfaceRole)
+	deviceCount := 0
 	for _, device := range parseIORegNodes(output) {
-		if device.class != "IOUSBHostDevice" || nodeInt(device, "idVendor") != appleVendorID {
+		if device.class != "IOUSBHostDevice" {
+			continue
+		}
+		deviceCount++
+		if nodeInt(device, "idVendor") != appleVendorID {
 			continue
 		}
 
 		controls := make(map[int]struct{})
 		dataInterfaces := make(map[int][]*ioregNode)
+		deviceNames := make(map[string]struct{})
 		for _, child := range device.children {
 			if child.class != "IOUSBHostInterface" {
 				continue
+			}
+			for _, name := range descendantBSDNames(child) {
+				deviceNames[name] = struct{}{}
 			}
 
 			number := nodeInt(child, "bInterfaceNumber")
@@ -104,46 +125,66 @@ func parseDarwinInterfaceRoles(output []byte) map[string]rsdInterfaceRole {
 		}
 
 		validDataInterfaces := make(map[int][]*ioregNode)
-		remotedInterfaceNumber := -1
+		hiddenDataInterfaces := make([]int, 0, 1)
 		for number, nodes := range dataInterfaces {
-			for _, node := range nodes {
-				for _, name := range descendantBSDNames(node) {
-					roles[name] = rsdInterfaceUnknown
-				}
-			}
 			if _, ok := controls[number-1]; !ok {
 				continue
 			}
 			validDataInterfaces[number] = nodes
-			if number > remotedInterfaceNumber {
-				remotedInterfaceNumber = number
-			}
-		}
-
-		// Apple devices expose a lower public/data NCM function and a higher
-		// private/remoted NCM function. With fewer than two complete pairs,
-		// there is not enough information to classify the interface safely.
-		if len(validDataInterfaces) < 2 {
-			continue
-		}
-
-		for number, nodes := range validDataInterfaces {
-			role := rsdInterfacePublic
-			if number == remotedInterfaceNumber {
-				role = rsdInterfaceRemoted
-			}
 			for _, node := range nodes {
-				for _, name := range descendantBSDNames(node) {
-					if existing, ok := roles[name]; ok && existing != rsdInterfaceUnknown && existing != role {
-						roles[name] = rsdInterfaceUnknown
-						continue
-					}
-					roles[name] = role
+				if descendantHasProperty(node, "HiddenInterface", "Yes") {
+					hiddenDataInterfaces = append(hiddenDataInterfaces, number)
+					break
 				}
 			}
 		}
+
+		deviceRoles := make(map[string]rsdInterfaceRole, len(deviceNames))
+		for name := range deviceNames {
+			deviceRoles[name] = rsdInterfaceUnknown
+		}
+
+		// Current Apple devices expose exactly two complete NCM functions. The
+		// private/remoted function has a positive HiddenInterface marker and is
+		// also the higher-numbered function. Any incomplete or contradictory
+		// snapshot remains unknown so RSD discovery fails open.
+		if len(validDataInterfaces) == 2 && len(hiddenDataInterfaces) == 1 {
+			remotedInterfaceNumber := hiddenDataInterfaces[0]
+			for number := range validDataInterfaces {
+				if number > remotedInterfaceNumber {
+					remotedInterfaceNumber = -1
+					break
+				}
+			}
+
+			if remotedInterfaceNumber >= 0 {
+				for number, nodes := range validDataInterfaces {
+					role := rsdInterfacePublic
+					if number == remotedInterfaceNumber {
+						role = rsdInterfaceRemoted
+					}
+					for _, node := range nodes {
+						for _, name := range descendantBSDNames(node) {
+							deviceRoles[name] = role
+						}
+					}
+				}
+			}
+		}
+
+		for name, role := range deviceRoles {
+			if existing, ok := roles[name]; ok && existing != role {
+				roles[name] = rsdInterfaceUnknown
+				continue
+			}
+			roles[name] = role
+		}
 	}
-	return roles
+
+	if deviceCount == 0 {
+		return nil, fmt.Errorf("no IOUSBHostDevice nodes found")
+	}
+	return roles, nil
 }
 
 func darwinInterfaceRole(roles map[string]rsdInterfaceRole, interfaceName string) rsdInterfaceRole {
@@ -254,4 +295,16 @@ func descendantBSDNames(node *ioregNode) []string {
 		names = append(names, descendantBSDNames(child)...)
 	}
 	return names
+}
+
+func descendantHasProperty(node *ioregNode, key, value string) bool {
+	if node.properties[key] == value {
+		return true
+	}
+	for _, child := range node.children {
+		if descendantHasProperty(child, key, value) {
+			return true
+		}
+	}
+	return false
 }
