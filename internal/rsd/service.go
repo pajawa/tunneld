@@ -196,8 +196,9 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 				if discoverCtx.Err() != nil {
 					return
 				}
+				role = rsdInterfaceUnknown
 				log.WithField("interface", ev.InterfaceName).WithError(err).
-					Debug("Could not classify interface, attempting RSD discovery")
+					Warn("Could not classify interface, attempting RSD discovery")
 			}
 			if role == rsdInterfacePublic || role == rsdInterfaceUnrelated {
 				message := "Skipping interface unrelated to RSD"

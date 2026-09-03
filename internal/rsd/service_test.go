@@ -417,7 +417,7 @@ func TestService_HandleInterfaceAdded_FailsOpenWhenClassificationIsUncertain(t *
 	}{
 		"remoted":          {role: rsdInterfaceRemoted},
 		"unknown":          {role: rsdInterfaceUnknown},
-		"classifier error": {role: rsdInterfaceUnknown, err: errors.New("ioreg failed")},
+		"classifier error": {role: rsdInterfacePublic, err: errors.New("ioreg failed")},
 	}
 
 	for name, test := range tests {
