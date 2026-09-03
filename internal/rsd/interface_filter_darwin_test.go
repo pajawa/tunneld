@@ -149,15 +149,23 @@ func TestDescendantUSBHostInterfacesAllowsIntermediaryNodes(t *testing.T) {
 	assert.Equal(t, []*ioregNode{wanted}, descendantUSBHostInterfaces(root))
 }
 
-func TestDescendantBSDNamesOnlyIncludesEthernetInterfaces(t *testing.T) {
+func TestDescendantPropertiesStayWithinUSBDeviceBoundary(t *testing.T) {
 	root := &ioregNode{
 		children: []*ioregNode{
 			{class: "IOEthernetInterface", properties: map[string]string{"BSD Name": `"en43"`}},
 			{class: "IOBlockStorageDevice", properties: map[string]string{"BSD Name": `"disk4"`}},
+			{
+				class:      "IOUSBHostDevice",
+				properties: map[string]string{"HiddenInterface": "Yes"},
+				children: []*ioregNode{
+					{class: "IOEthernetInterface", properties: map[string]string{"BSD Name": `"en99"`}},
+				},
+			},
 		},
 	}
 
 	assert.Equal(t, []string{"en43"}, descendantBSDNames(root))
+	assert.False(t, descendantHasProperty(root, "HiddenInterface", "Yes"))
 }
 
 func TestRetryDarwinInterfaceRoleRetriesUncertainResults(t *testing.T) {

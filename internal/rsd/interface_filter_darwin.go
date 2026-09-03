@@ -19,6 +19,8 @@ const (
 	ioregFailureCache   = 100 * time.Millisecond
 	ioregNegativeRetry  = 750 * time.Millisecond
 	ioregCommandTimeout = 2 * time.Second
+
+	platformHasRsdInterfaceClassifier = true
 )
 
 var defaultDarwinInterfaceRoles darwinInterfaceRoleCache
@@ -388,6 +390,9 @@ func descendantBSDNames(node *ioregNode) []string {
 		}
 	}
 	for _, child := range node.children {
+		if child.class == "IOUSBHostDevice" {
+			continue
+		}
 		names = append(names, descendantBSDNames(child)...)
 	}
 	return names
@@ -398,6 +403,9 @@ func descendantHasProperty(node *ioregNode, key, value string) bool {
 		return true
 	}
 	for _, child := range node.children {
+		if child.class == "IOUSBHostDevice" {
+			continue
+		}
 		if descendantHasProperty(child, key, value) {
 			return true
 		}

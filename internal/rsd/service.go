@@ -201,8 +201,12 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 					Warn("Could not classify interface, attempting RSD discovery")
 			}
 			if role == rsdInterfaceUnknown && err == nil {
-				log.WithField("interface", ev.InterfaceName).
-					Warn("Interface classification inconclusive, attempting RSD discovery")
+				entry := log.WithField("interface", ev.InterfaceName)
+				if platformHasRsdInterfaceClassifier {
+					entry.Warn("Interface classification inconclusive, attempting RSD discovery")
+				} else {
+					entry.Debug("Interface classification unavailable, attempting RSD discovery")
+				}
 			} else if role == rsdInterfaceRemoted {
 				log.WithField("interface", ev.InterfaceName).
 					Debug("Interface positively classified as private CDC-NCM")
