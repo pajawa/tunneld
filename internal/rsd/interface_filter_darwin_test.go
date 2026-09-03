@@ -54,8 +54,9 @@ func TestParseDarwinInterfaceRolesLeavesIncompletePairUnknown(t *testing.T) {
 	snapshot, err := parseDarwinInterfaceRoles(output)
 	require.NoError(t, err)
 	assert.Equal(t, rsdInterfaceUnknown, snapshot.roles["en25"])
-	assert.Equal(t, rsdInterfaceUnknown, snapshot.role("en38"))
-	assert.False(t, snapshot.reliableAbsence)
+	assert.Equal(t, rsdInterfaceUnrelated, snapshot.role("en0"))
+	assert.Equal(t, rsdInterfaceUnrelated, snapshot.role("en38"))
+	assert.True(t, snapshot.reliableAbsence)
 }
 
 func TestParseDarwinInterfaceRolesFailsOpenWithoutHiddenMarker(t *testing.T) {
@@ -148,6 +149,17 @@ func TestDescendantUSBHostInterfacesAllowsIntermediaryNodes(t *testing.T) {
 	assert.Equal(t, []*ioregNode{wanted}, descendantUSBHostInterfaces(root))
 }
 
+func TestDescendantBSDNamesOnlyIncludesEthernetInterfaces(t *testing.T) {
+	root := &ioregNode{
+		children: []*ioregNode{
+			{class: "IOEthernetInterface", properties: map[string]string{"BSD Name": `"en43"`}},
+			{class: "IOBlockStorageDevice", properties: map[string]string{"BSD Name": `"disk4"`}},
+		},
+	}
+
+	assert.Equal(t, []string{"en43"}, descendantBSDNames(root))
+}
+
 func TestRetryDarwinInterfaceRoleRetriesUncertainResults(t *testing.T) {
 	tests := map[string]struct {
 		role rsdInterfaceRole
@@ -212,4 +224,25 @@ func TestDarwinInterfaceRoleCacheCachesScanFailure(t *testing.T) {
 		assert.Equal(t, rsdInterfaceUnknown, role)
 	}
 	assert.Equal(t, 1, scanCalls)
+}
+
+func TestDarwinInterfaceRoleCacheDoesNotPublishCancelledScan(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	original := darwinInterfaceRoleSnapshot{
+		roles:           map[string]rsdInterfaceRole{"en43": rsdInterfaceRemoted},
+		reliableAbsence: true,
+	}
+	cache := darwinInterfaceRoleCache{
+		snapshot: original,
+		scan: func(context.Context) (darwinInterfaceRoleSnapshot, error) {
+			cancel()
+			return darwinInterfaceRoleSnapshot{}, ctx.Err()
+		},
+	}
+
+	role, err := cache.role(ctx, "en43")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, rsdInterfaceUnknown, role)
+	assert.Equal(t, original, cache.snapshot)
+	assert.NoError(t, cache.err)
 }

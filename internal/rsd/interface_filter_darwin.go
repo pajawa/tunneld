@@ -86,18 +86,26 @@ func (c *darwinInterfaceRoleCache) role(ctx context.Context, interfaceName strin
 	if time.Now().Before(c.expiresAt) {
 		return c.snapshot.role(interfaceName), c.err
 	}
+	if err := ctx.Err(); err != nil {
+		return rsdInterfaceUnknown, err
+	}
 
 	scan := c.scan
 	if scan == nil {
 		scan = scanDarwinInterfaceRoles
 	}
 	snapshot, err := scan(ctx)
-	c.snapshot = snapshot
-	c.err = err
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return rsdInterfaceUnknown, ctxErr
+		}
+		c.snapshot = snapshot
+		c.err = err
 		c.expiresAt = time.Now().Add(ioregFailureCache)
 		return rsdInterfaceUnknown, err
 	}
+	c.snapshot = snapshot
+	c.err = nil
 	c.expiresAt = time.Now().Add(ioregCacheDuration)
 
 	return snapshot.role(interfaceName), nil
@@ -186,6 +194,7 @@ func parseDarwinInterfaceRoles(output []byte) (darwinInterfaceRoleSnapshot, erro
 		}
 
 		complete := len(controls) == 2 && len(dataInterfaces) == 2
+		missingBSDName := false
 		for number := range controls {
 			if _, ok := dataInterfaces[number+1]; !ok {
 				complete = false
@@ -198,11 +207,14 @@ func parseDarwinInterfaceRoles(output []byte) (darwinInterfaceRoleSnapshot, erro
 			for _, node := range nodes {
 				if len(descendantBSDNames(node)) == 0 {
 					complete = false
+					missingBSDName = true
 				}
 			}
 		}
-		if !complete {
+		if missingBSDName {
 			snapshot.reliableAbsence = false
+		}
+		if !complete {
 			mergeDarwinInterfaceRoles(snapshot.roles, deviceRoles)
 			continue
 		}
@@ -370,8 +382,10 @@ func nodeInt(node *ioregNode, key string) (int, bool) {
 
 func descendantBSDNames(node *ioregNode) []string {
 	var names []string
-	if name, ok := nodeString(node, "BSD Name"); ok && name != "" {
-		names = append(names, name)
+	if node.class == "IOEthernetInterface" {
+		if name, ok := nodeString(node, "BSD Name"); ok && name != "" {
+			names = append(names, name)
+		}
 	}
 	for _, child := range node.children {
 		names = append(names, descendantBSDNames(child)...)
