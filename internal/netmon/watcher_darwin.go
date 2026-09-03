@@ -112,6 +112,12 @@ func (w *darwinWatcher) handleInterfaceEvent(index int, msgType byte, ifFlags ui
 		}
 	}
 
+	// IPv6 addresses can be removed during normal NCM interface reconfiguration.
+	// Only an interface-down event or a failed lookup means the interface is gone.
+	if msgType == rtmDelAddr {
+		return
+	}
+
 	// Only call net.InterfaceByIndex for events on interfaces that might be relevant
 	iface, err := net.InterfaceByIndex(index)
 	if err != nil {
@@ -145,10 +151,6 @@ func (w *darwinWatcher) handleInterfaceEvent(index int, msgType byte, ifFlags ui
 		log.WithField("interface", iface.Name).Trace("Interface now has IPv6 address")
 		w.tracked[iface.Name] = struct{}{}
 		callback(InterfaceEvent{Type: InterfaceAdded, InterfaceName: iface.Name})
-	} else if !hasIPv6 && isTracked {
-		log.WithField("interface", iface.Name).Trace("Interface no longer has IPv6 address")
-		delete(w.tracked, iface.Name)
-		callback(InterfaceEvent{Type: InterfaceRemoved, InterfaceName: iface.Name})
 	}
 }
 
