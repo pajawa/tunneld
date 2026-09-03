@@ -9,6 +9,11 @@ Based off Go-iOS's tunnel service but with a few differences:
 - Supports on-demand tunnels via WebSocket request
 - Only supports Linux and MacOS (no support for Windows)
 
+On macOS, RSD discovery is scoped to Apple USB CDC-NCM interfaces. Built-in
+Ethernet, Wi-Fi, and third-party USB network interfaces are ignored. If the USB
+registry cannot identify an Apple interface unambiguously, tunneld attempts RSD
+discovery on it rather than risk excluding a device interface.
+
 ## Getting started
 
 ```

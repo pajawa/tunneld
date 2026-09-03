@@ -15,6 +15,15 @@ type discoveryInfo struct {
 	cancel context.CancelFunc
 }
 
+type rsdInterfaceRole uint8
+
+const (
+	rsdInterfaceUnknown rsdInterfaceRole = iota
+	rsdInterfacePublic
+	rsdInterfaceRemoted
+	rsdInterfaceUnrelated
+)
+
 type Service struct {
 	// NetMon subscription
 	ifCh    <-chan netmon.InterfaceEvent
@@ -34,15 +43,19 @@ type Service struct {
 	discoveries     map[string]discoveryInfo // interface name -> discovery info
 	nextDiscoveryID uint64
 	wg              sync.WaitGroup // Track goroutines for clean shutdown
+	interfaceRole   func(context.Context, string) (rsdInterfaceRole, error)
+	findRsdService  func(context.Context, string) (RsdService, error)
 
 	closed bool
 }
 
 func NewService() *Service {
 	return &Service{
-		rsdMap:      make(map[string]RsdService),
-		subs:        make(map[int]*runtime.SubQueue[RsdServiceEvent]),
-		discoveries: make(map[string]discoveryInfo),
+		rsdMap:         make(map[string]RsdService),
+		subs:           make(map[int]*runtime.SubQueue[RsdServiceEvent]),
+		discoveries:    make(map[string]discoveryInfo),
+		interfaceRole:  platformRsdInterfaceRole,
+		findRsdService: FindRsdService,
 	}
 }
 
@@ -178,7 +191,37 @@ func (s *Service) handleNetworkInterfaceEvent(ctx context.Context, ev netmon.Int
 				s.discoveriesMu.Unlock()
 			}()
 
-			rsdService, err := FindRsdService(discoverCtx, ev.InterfaceName)
+			role, err := s.interfaceRole(discoverCtx, ev.InterfaceName)
+			if err != nil {
+				if discoverCtx.Err() != nil {
+					return
+				}
+				role = rsdInterfaceUnknown
+				log.WithField("interface", ev.InterfaceName).WithError(err).
+					Warn("Could not classify interface, attempting RSD discovery")
+			}
+			if role == rsdInterfaceUnknown && err == nil {
+				entry := log.WithField("interface", ev.InterfaceName)
+				if platformHasRsdInterfaceClassifier {
+					entry.Warn("Interface classification inconclusive, attempting RSD discovery")
+				} else {
+					entry.Debug("Interface classification unavailable, attempting RSD discovery")
+				}
+			} else if role == rsdInterfaceRemoted {
+				log.WithField("interface", ev.InterfaceName).
+					Debug("Interface positively classified as private CDC-NCM")
+			}
+			if role == rsdInterfacePublic || role == rsdInterfaceUnrelated {
+				if role == rsdInterfacePublic {
+					log.WithField("interface", ev.InterfaceName).
+						Warn("Skipping interface positively classified as public CDC-NCM")
+					return
+				}
+				log.WithField("interface", ev.InterfaceName).Info("Skipping interface unrelated to RSD")
+				return
+			}
+
+			rsdService, err := s.findRsdService(discoverCtx, ev.InterfaceName)
 			if err != nil {
 				log.WithField("interface", ev.InterfaceName).WithError(err).Trace("Stopped looking for an RSD service")
 				return
